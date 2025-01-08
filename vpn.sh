@@ -4,7 +4,7 @@
 #  - На Ubuntu (20.04/22.04/24.04) ставим dnsmasq.
 #  - На Linux Mint ставим isc-dhcp-server + NetworkManager.
 # ----------------------------------------------------------------------------
-# Версия: 6.0.0
+# Версия: 6.1.0
 # ----------------------------------------------------------------------------
 
 # =========================== ЦВЕТА ===========================================
@@ -14,7 +14,7 @@ YELLOW="\e[33m"
 BOLD="\e[1m"
 NC="\e[0m"   # Сброс цвета
 
-SCRIPT_VERSION="6.0.0"
+SCRIPT_VERSION="6.1.0"
 
 LOG_BASE_DIR="$HOME/log"
 LOG_SETUP_DIR="$LOG_BASE_DIR/vpn-setup"
@@ -134,29 +134,7 @@ full_system_upgrade() {
   return 0
 }
 
-# ====================== 2. УДАЛЕНИЕ (или бэкап) СТАРЫХ VPN-ФАЙЛОВ ============
-remove_or_backup_old_configs() {
-  echo -e "\nХотите удалить (или переименовать в backup_) старые VPN-конфиги? (y/n)"
-  read -r ans
-  if [[ "$ans" =~ ^[Yy]$ ]]; then
-    log_setup_info "Удаление/переименование старых VPN-конфигов."
-    if [ -d /etc/openvpn ]; then
-      for cfg in /etc/openvpn/*.conf /etc/openvpn/*.ovpn; do
-        [ -f "$cfg" ] && sudo mv "$cfg" "${cfg}.backup_$(date +%Y%m%d_%H%M%S)"
-      done
-    fi
-    if [ -d /etc/wireguard ]; then
-      for cfg in /etc/wireguard/*.conf; do
-        [ -f "$cfg" ] && sudo mv "$cfg" "${cfg}.backup_$(date +%Y%m%d_%H%M%S)"
-      done
-    fi
-    echo "Старые VPN-конфиги переименованы."
-  else
-    echo "Пропускаем удаление старых конфигов."
-  fi
-}
-
-# ====================== 3. BACKUP/RESTORE NETPLAN ============================
+# ====================== 2. BACKUP/RESTORE NETPLAN ============================
 backup_netplan_configs() {
   [ ! -d "$NETPLAN_BACKUP_DIR" ] && mkdir -p "$NETPLAN_BACKUP_DIR"
   cp -a /etc/netplan/*.yaml "$NETPLAN_BACKUP_DIR" 2>/dev/null || true
@@ -178,7 +156,7 @@ remove_our_netplan_file() {
   [ -f "$NETPLAN_MAIN_FILE" ] && rm -f "$NETPLAN_MAIN_FILE"
 }
 
-# ====================== 4. ВЫБОР ИНТЕРФЕЙСОВ (WAN/LAN) =======================
+# ====================== 3. ВЫБОР ИНТЕРФЕЙСОВ (WAN/LAN) =======================
 select_interfaces() {
   echo ""
   echo "Определяем все интерфейсы (IPv4), кроме lo..."
@@ -223,7 +201,7 @@ select_interfaces() {
   SELECTED_LAN_IF="$lan_iface"
 }
 
-# ====================== 5. ПРОВЕРКА ИНТЕРНЕТА (DNS+HTTP) =====================
+# ====================== 4. ПРОВЕРКА ИНТЕРНЕТА (DNS+HTTP) =====================
 check_internet_with_animation() {
   echo ""
   echo "Проверяем доступ к Интернету (DNS + HTTP)..."
@@ -336,7 +314,7 @@ EOD"
   return 0
 }
 
-# ====================== 6. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
+# ====================== 5. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
 configure_network() {
   local block_name="Настройка сети"
   echo -e "\n===== $block_name ====="
@@ -438,7 +416,7 @@ EOF"
   return 0
 }
 
-# ====================== 7. УСТАНОВКА VPN + WEB ================================
+# ====================== 6. УСТАНОВКА VPN + WEB ================================
 install_vpn_and_web() {
   local block_name="Установка VPN + Web"
   echo -e "\n===== $block_name ====="
@@ -504,7 +482,7 @@ EOD'
   return 0
 }
 
-# ====================== 8. МОНИТОРИНГ VPN (TIMER) ============================
+# ====================== 7. МОНИТОРИНГ VPN (TIMER) ============================
 create_vpn_monitor_script() {
   sudo bash -c "cat <<'EOF' > /usr/local/bin/vpn-monitor.sh
 #!/usr/bin/env bash
@@ -605,7 +583,7 @@ enable_vpn_monitor() {
   [ $res -eq 0 ] && echo "Мониторинг VPN запущен." || abort_script "$block_name" "Не удалось запустить таймер"
 }
 
-# ====================== 9. УДАЛЕНИЕ НАСТРОЕК И ОТКАТ ========================
+# ====================== 8. УДАЛЕНИЕ НАСТРОЕК И ОТКАТ ========================
 remove_all_settings() {
   local block_name="Удаление всех настроек"
   echo -e "\n===== $block_name ====="
