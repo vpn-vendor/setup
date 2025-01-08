@@ -4,7 +4,7 @@
 #  - На Ubuntu (20.04/22.04/24.04) ставим dnsmasq.
 #  - На Linux Mint ставим isc-dhcp-server + NetworkManager.
 # ----------------------------------------------------------------------------
-# Версия: 6.2.0
+# Версия: 6.2.1
 # ----------------------------------------------------------------------------
 
 # =========================== ЦВЕТА ===========================================
@@ -14,7 +14,7 @@ YELLOW="\e[33m"
 BOLD="\e[1m"
 NC="\e[0m"   # Сброс цвета
 
-SCRIPT_VERSION="6.2.0"
+SCRIPT_VERSION="6.2.1"
 
 LOG_BASE_DIR="$HOME/log"
 LOG_SETUP_DIR="$LOG_BASE_DIR/vpn-setup"
@@ -136,15 +136,15 @@ full_system_upgrade() {
 
 # ====================== 2. BACKUP/RESTORE NETPLAN ============================
 backup_netplan_configs() {
-  [ ! -d "$NETPLAN_BACKUP_DIR" ] && mkdir -p "$NETPLAN_BACKUP_DIR"
-  cp -a /etc/netplan/*.yaml "$NETPLAN_BACKUP_DIR" 2>/dev/null || true
+  [ ! -d "$NETPLAN_BACKUP_DIR" ] && sudo mkdir -p "$NETPLAN_BACKUP_DIR"
+  sudo cp -a /etc/netplan/*.yaml "$NETPLAN_BACKUP_DIR" 2>/dev/null || true
   log_setup_info "Бэкап netplan в: $NETPLAN_BACKUP_DIR"
 }
 
 restore_netplan_configs() {
   if [ -d "$NETPLAN_BACKUP_DIR" ]; then
-    rm -f /etc/netplan/*.yaml
-    cp -a "$NETPLAN_BACKUP_DIR"/*.yaml /etc/netplan/ 2>/dev/null || true
+    sudo rm -f /etc/netplan/*.yaml
+    sudo cp -a "$NETPLAN_BACKUP_DIR"/*.yaml /etc/netplan/ 2>/dev/null || true
     log_setup_info "Восстановлен netplan из: $NETPLAN_BACKUP_DIR"
   else
     log_setup_error "Папка с бэкапом netplan не найдена"
@@ -153,7 +153,14 @@ restore_netplan_configs() {
 }
 
 remove_our_netplan_file() {
-  [ -f "$NETPLAN_MAIN_FILE" ] && rm -f "$NETPLAN_MAIN_FILE"
+  [ -f "$NETPLAN_MAIN_FILE" ] && sudo rm -f "$NETPLAN_MAIN_FILE"
+}
+
+# ====================== 2.1. CLEANUP NETPLAN CONFIGS ==========================
+cleanup_netplan_configs() {
+  echo "Удаляем все конфигурационные файлы Netplan, кроме бэкапов..."
+  sudo find /etc/netplan/ -type f -name '*.yaml' ! -name 'backup_*.yaml' -exec rm -f {} \;
+  log_setup_info "Удалены все Netplan файлы кроме бэкапов."
 }
 
 # ====================== 3. ВЫБОР ИНТЕРФЕЙСОВ (WAN/LAN) =======================
@@ -263,13 +270,6 @@ EOD"
 }
 
 # ====================== DHCP ДЛЯ MINT (isc-dhcp-server) ======================
-echo "Отключаем systemd-networkd, включаем NetworkManager..."
-  sudo systemctl stop systemd-networkd
-  sudo systemctl mask systemd-networkd
-
-  sudo systemctl enable NetworkManager
-  sudo systemctl start NetworkManager
-  
 install_dhcp_mint() {
   echo "Устанавливаем isc-dhcp-server (Mint)..."
   spinner_while "sudo apt-get install -y isc-dhcp-server network-manager"
@@ -280,6 +280,12 @@ install_dhcp_mint() {
     return 1
   fi
 
+  echo "Отключаем systemd-networkd, включаем NetworkManager..."
+  sudo systemctl stop systemd-networkd
+  sudo systemctl mask systemd-networkd
+
+  sudo systemctl enable NetworkManager
+  sudo systemctl start NetworkManager
 
   echo "Создаём NM-подключение для LAN-интерфейса ($SELECTED_LAN_IF)..."
   nmcli con add type ethernet con-name static-$SELECTED_LAN_IF \
@@ -315,17 +321,12 @@ EOD"
 }
 
 # ====================== 5. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
-sudo chmod 600 /etc/netplan/01-network-manager-all.yaml
-sudo chown root:root /etc/netplan/01-network-manager-all.yaml
-
-sudo systemctl start systemd-networkd
-sudo systemctl enable systemd-networkd
 configure_network() {
   local block_name="Настройка сети"
   echo -e "\n===== $block_name ====="
 
   backup_netplan_configs
-  remove_our_netplan_file
+  cleanup_netplan_configs
 
   # Спросим локальный IP
   echo "Будет LAN: 192.168.1.1 (по умолчанию)."
@@ -603,7 +604,7 @@ remove_all_settings() {
   sudo rm -rf /etc/openvpn
   sudo rm -rf /etc/wireguard
 
-  spinner_while "sudo apt-get purge -y wireguard openvpn dnsmasq isc-dhcp-server"
+  spinner_while "sudo apt-get purge -y wireguard openvpn dnsmasq isc-dhcp-server apache2 php git"
   spinner_while "sudo apt-get autoremove -y"
 
   sudo rm -rf /var/www/html
@@ -657,7 +658,7 @@ main_menu() {
   echo "4) Удалить все настройки (VPN, DHCP) и откатить netplan"
   echo "5) Восстановить netplan из бэкапа"
   echo ""
-
+  
   read -p "Ваш выбор [1/2/3/4/5]: " choice
   case "$choice" in
     1)
@@ -695,6 +696,11 @@ main_menu() {
 # ========================== ЗАПУСК СКРИПТА ===================================
 detect_distro
 echo "Определён дистрибутив: $DISTRO_TYPE"
+
+if [[ "$DISTRO_TYPE" != "ubuntu" && "$DISTRO_TYPE" != "mint" ]]; then
+  echo -e "${RED}Дистрибутив не поддерживается этим скриптом. Работа не гарантируется.${NC}"
+  exit 1
+fi
 
 # 1) Полный upgrade
 full_system_upgrade
