@@ -275,7 +275,6 @@ install_dhcp_mint() {
 
   echo "Отключаем systemd-networkd, включаем NetworkManager..."
   sudo systemctl stop systemd-networkd
-  sudo systemctl disable systemd-networkd
   sudo systemctl mask systemd-networkd
 
   sudo systemctl enable NetworkManager
@@ -316,6 +315,7 @@ EOD"
 
 # ====================== 5. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
 sudo systemctl start systemd-networkd
+sudo systemctl enable systemd-networkd
 configure_network() {
   local block_name="Настройка сети"
   echo -e "\n===== $block_name ====="
