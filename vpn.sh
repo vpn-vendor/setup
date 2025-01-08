@@ -315,6 +315,7 @@ EOD"
 }
 
 # ====================== 5. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
+sudo systemctl start systemd-networkd
 configure_network() {
   local block_name="Настройка сети"
   echo -e "\n===== $block_name ====="
