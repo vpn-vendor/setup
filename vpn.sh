@@ -1,39 +1,42 @@
 #!/usr/bin/env bash
 # ----------------------------------------------------------------------------
-# Скрипт автонастройки VPN-раздачи интернета в локальную сеть + Веб-интерфейс
+# Скрипт автонастройки сервера (VPN + DHCP + Web) с учётом различий:
+#  - На Ubuntu (20.04/22.04/24.04) ставим dnsmasq.
+#  - На Linux Mint ставим isc-dhcp-server + NetworkManager.
 # ----------------------------------------------------------------------------
-# Версия: 5.1.0
-# ----------------------------------------------------------------------------
-# Основные изменения:
-#  - Отключаем systemd-resolved на Mint, чтобы dnsmasq занял порт 53.
-#  - Убираем чрезмерную анимацию: оставляем спиннер только на установке больших пакетов.
-#  - debconf-set-selections для iptables-persistent (убираем диалог).
+# Версия: 6.0.0
 # ----------------------------------------------------------------------------
 
-# ============================== ЦВЕТА ========================================
+# =========================== ЦВЕТА ===========================================
 GREEN="\e[32m"
 RED="\e[31m"
 YELLOW="\e[33m"
 BOLD="\e[1m"
-NC="\e[0m"   # сброс цвета
+NC="\e[0m"   # Сброс цвета
 
-SCRIPT_VERSION="5.1.0"
+SCRIPT_VERSION="6.0.0"
 
 LOG_BASE_DIR="$HOME/log"
 LOG_SETUP_DIR="$LOG_BASE_DIR/vpn-setup"
 LOG_MONITOR_DIR="$LOG_BASE_DIR/vpn-monitor"
 LOG_RETENTION_DAYS=7
 
-NETPLAN_BACKUP_DIR="/etc/netplan/backup_$(date +%Y%m%d_%H%M%S)"
-NETPLAN_MAIN_FILE="/etc/netplan/01-network-manager-all.yaml"
-
 VPN_MONITOR_INTERVAL="60"
+
+# Для бэкапов netplan
+NETPLAN_BACKUP_DIR="/etc/netplan/backup_$(date +%Y%m%d_%H%M%S)"
+
+# Основной netplan-файл (если используем netplan на Ubuntu)
+NETPLAN_MAIN_FILE="/etc/netplan/01-my-network-setup.yaml"
+
+DISTRO_TYPE="unknown"
 
 # ========================== ЛОГИРОВАНИЕ ======================================
 get_today_logfile() {
   local log_subdir="$1"
   local logdir="${LOG_BASE_DIR}/${log_subdir}"
   mkdir -p "$logdir"
+  # Чистим старые логи
   find "$logdir" -type f -mtime +$LOG_RETENTION_DAYS -exec rm -f {} \; 2>/dev/null
   local logfile="${logdir}/${log_subdir}-$(date +%Y-%m-%d).log"
   echo "$logfile"
@@ -43,7 +46,6 @@ log_message() {
   local log_subdir="$1"
   local level="$2"
   local message="$3"
-
   local logfile
   logfile="$(get_today_logfile "$log_subdir")"
 
@@ -58,16 +60,14 @@ log_setup_error()   { log_message "vpn-setup" "ERROR" "$1"; }
 log_monitor_info()  { log_message "vpn-monitor" "INFO"  "$1"; }
 log_monitor_error() { log_message "vpn-monitor" "ERROR" "$1"; }
 
-# ======================== ПОЛЕЗНЫЕ ФУНКЦИИ ===================================
+# ========================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========================
 spinner_while() {
-  # Запускаем команду в фоне
   local cmd="$*"
   bash -c "$cmd" &
   local pid=$!
 
   local sp='|/-\'
   local i=0
-
   while kill -0 "$pid" 2>/dev/null; do
     printf " [%c] " "${sp:i:1}"
     i=$(( (i+1) % ${#sp} ))
@@ -97,34 +97,23 @@ abort_script() {
   read -r -p "Нажмите Enter для продолжения..."
 }
 
-check_ubuntu_or_mint() {
+# ====================== 0. ОПРЕДЕЛЯЕМ DISTRO (UBUNTU/ MINT) =================
+detect_distro() {
   if [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [[ "$ID" == "ubuntu" || "$ID" == "linuxmint" ]]; then
-      return 0
+    if [[ "$ID" == "ubuntu" ]]; then
+      DISTRO_TYPE="ubuntu"
+    elif [[ "$ID" == "linuxmint" ]]; then
+      DISTRO_TYPE="mint"
+    else
+      DISTRO_TYPE="unknown"
     fi
+  else
+    DISTRO_TYPE="unknown"
   fi
-  echo -e "${RED}Предупреждение: дистрибутив не Ubuntu/Mint! Работа не гарантируется...${NC}"
-  return 0
 }
 
-# ================== ОТКЛЮЧЕНИЕ systemd-resolved (Mint) ======================
-disable_systemd_resolved() {
-  echo -e "${YELLOW}Отключаем systemd-resolved, чтобы dnsmasq занял 53 порт...${NC}"
-  log_setup_info "Отключение systemd-resolved."
-  # Стопим и дизейблим
-  sudo systemctl stop systemd-resolved
-  sudo systemctl disable systemd-resolved
-
-  # Правим /etc/resolv.conf
-  sudo rm -f /etc/resolv.conf
-  # Подставляем базовый DNS
-  echo "nameserver 1.1.1.1" | sudo tee /etc/resolv.conf >/dev/null
-  # Перезапуск NM на всякий
-  sudo systemctl restart NetworkManager
-}
-
-# ================== 1. ПОЛНОЕ ОБНОВЛЕНИЕ СИСТЕМЫ ============================
+# ====================== 1. ПОЛНОЕ ОБНОВЛЕНИЕ СИСТЕМЫ ========================
 remove_ufw_if_installed() {
   if dpkg -s ufw &>/dev/null; then
     echo "Обнаружен ufw. Удаляем (во избежание конфликтов iptables-persistent)."
@@ -145,7 +134,7 @@ full_system_upgrade() {
   return 0
 }
 
-# ============ 2. УДАЛЕНИЕ (ИЛИ ПЕРЕИМЕНОВАНИЕ) СТАРЫХ VPN-КОНФИГОВ ==========
+# ====================== 2. УДАЛЕНИЕ (или бэкап) СТАРЫХ VPN-ФАЙЛОВ ============
 remove_or_backup_old_configs() {
   echo -e "\nХотите удалить (или переименовать в backup_) старые VPN-конфиги? (y/n)"
   read -r ans
@@ -167,7 +156,29 @@ remove_or_backup_old_configs() {
   fi
 }
 
-# ============ 3. ВЫБОР СЕТЕВЫХ ИНТЕРФЕЙСОВ ==================================
+# ====================== 3. BACKUP/RESTORE NETPLAN ============================
+backup_netplan_configs() {
+  [ ! -d "$NETPLAN_BACKUP_DIR" ] && mkdir -p "$NETPLAN_BACKUP_DIR"
+  cp -a /etc/netplan/*.yaml "$NETPLAN_BACKUP_DIR" 2>/dev/null || true
+  log_setup_info "Бэкап netplan в: $NETPLAN_BACKUP_DIR"
+}
+
+restore_netplan_configs() {
+  if [ -d "$NETPLAN_BACKUP_DIR" ]; then
+    rm -f /etc/netplan/*.yaml
+    cp -a "$NETPLAN_BACKUP_DIR"/*.yaml /etc/netplan/ 2>/dev/null || true
+    log_setup_info "Восстановлен netplan из: $NETPLAN_BACKUP_DIR"
+  else
+    log_setup_error "Папка с бэкапом netplan не найдена"
+    echo "Откат невозможен: нет бэкапа."
+  fi
+}
+
+remove_our_netplan_file() {
+  [ -f "$NETPLAN_MAIN_FILE" ] && rm -f "$NETPLAN_MAIN_FILE"
+}
+
+# ====================== 4. ВЫБОР ИНТЕРФЕЙСОВ (WAN/LAN) =======================
 select_interfaces() {
   echo ""
   echo "Определяем все интерфейсы (IPv4), кроме lo..."
@@ -186,7 +197,7 @@ select_interfaces() {
       ip_addr=$(echo "$interfaces_and_addresses" | grep "$iface" | awk '{print $2}')
       full_list+="$iface: $ip_addr\n"
     else
-      full_list+="$iface: нет IP-адреса (возможно для LAN)\n"
+      full_list+="$iface: нет IP (возможно LAN)\n"
     fi
   done
 
@@ -212,29 +223,7 @@ select_interfaces() {
   SELECTED_LAN_IF="$lan_iface"
 }
 
-# ============ 4. BACKUP/RESTORE NETPLAN ======================================
-backup_netplan_configs() {
-  [ ! -d "$NETPLAN_BACKUP_DIR" ] && mkdir -p "$NETPLAN_BACKUP_DIR"
-  cp -a /etc/netplan/*.yaml "$NETPLAN_BACKUP_DIR" 2>/dev/null || true
-  log_setup_info "Бэкап netplan в: $NETPLAN_BACKUP_DIR"
-}
-
-restore_netplan_configs() {
-  if [ -d "$NETPLAN_BACKUP_DIR" ]; then
-    rm -f /etc/netplan/*.yaml
-    cp -a "$NETPLAN_BACKUP_DIR"/*.yaml /etc/netplan/ 2>/dev/null || true
-    log_setup_info "Восстановлен netplan из: $NETPLAN_BACKUP_DIR"
-  else
-    log_setup_error "Папка с бэкапом netplan не найдена"
-    echo "Откат невозможен: нет бэкапа."
-  fi
-}
-
-remove_our_netplan_file() {
-  [ -f "$NETPLAN_MAIN_FILE" ] && rm -f "$NETPLAN_MAIN_FILE"
-}
-
-# ============ 5. ПРОВЕРКА ИНТЕРНЕТА (DNS + HTTP) ============================
+# ====================== 5. ПРОВЕРКА ИНТЕРНЕТА (DNS+HTTP) =====================
 check_internet_with_animation() {
   echo ""
   echo "Проверяем доступ к Интернету (DNS + HTTP)..."
@@ -262,135 +251,23 @@ check_internet_with_animation() {
   fi
 }
 
-# ============ 6. НАСТРОЙКА СЕТИ (NETPLAN + DNSMASQ) =========================
-configure_network() {
-  local block_name="Настройка сетей (Netplan + dnsmasq)"
-  echo -e "\n===== $block_name ====="
-
-  backup_netplan_configs
-  remove_our_netplan_file
-
-  echo "Будет LAN: 192.168.1.1 (по умолчанию)."
-  read -p "Введите локальный IP (192.168.X.1) или Enter для 192.168.1.1: " local_ip
-  [ -z "$local_ip" ] && local_ip="192.168.1.1"
-
-  if [[ ! "$local_ip" =~ ^192\.168\.[0-9]{1,3}\.1$ ]]; then
-    print_status 1 "$block_name"
-    abort_script "$block_name" "Неверный IP формат: $local_ip"
-    return 1
-  fi
-
-  echo "Способ получения WAN IP:"
-  echo "1) DHCP"
-  echo "2) Статический"
-  read -p "Ваш выбор (1/2): " wan_choice
-
-  local wan_config=""
-  local lan_config="      dhcp4: false
-      addresses: [$local_ip/24]
-      nameservers:
-        addresses: [1.1.1.1, 1.0.0.1]
-      optional: true"
-
-  if [ "$wan_choice" == "1" ]; then
-    wan_config="      dhcp4: true"
-  elif [ "$wan_choice" == "2" ]; then
-    echo "IP (пример: 46.98.249.14)?"
-    read -p "WAN IP: " wan_ip
-    echo "Маска (пример: 24)?"
-    read -p "WAN CIDR: " wan_cidr
-    [ -z "$wan_cidr" ] && wan_cidr="24"
-    echo "Шлюз (пример: 46.98.249.13)?"
-    read -p "WAN Gateway: " wan_gw
-    echo "DNS1:"
-    read -p "DNS1: " wan_dns1
-    echo "DNS2:"
-    read -p "DNS2: " wan_dns2
-
-    wan_config="      dhcp4: false
-      addresses: [$wan_ip/$wan_cidr]
-      gateway4: $wan_gw
-      nameservers:
-        addresses: [$wan_dns1, $wan_dns2]"
-  else
-    print_status 1 "$block_name"
-    abort_script "$block_name" "Неправильный ввод (WAN Choice)"
-    return 1
-  fi
-
-  sudo bash -c "cat <<EOF > $NETPLAN_MAIN_FILE
-network:
-  version: 2
-  renderer: NetworkManager
-  ethernets:
-    $SELECTED_WAN_IF:
-$wan_config
-    $SELECTED_LAN_IF:
-$lan_config
-EOF"
-
-  echo "Применяем netplan..."
-  spinner_while "sudo netplan apply"
-  local nres=$?
-  if [ $nres -ne 0 ]; then
-    print_status $nres "$block_name"
-    abort_script "$block_name" "netplan apply неуспешен!"
-    restore_netplan_configs
-    spinner_while "sudo netplan apply"
-    return 1
-  fi
-
-  check_internet_with_animation
-  local inet_check=$?
-  if [ $inet_check -eq 0 ]; then
-    echo "Интернет доступен."
-  else
-    print_status 1 "$block_name"
-    abort_script "$block_name" "Нет интернета (код=$inet_check)."
-    remove_our_netplan_file
-    restore_netplan_configs
-    spinner_while "sudo netplan apply"
-    return 1
-  fi
-
-  # ----------------------------------------------------------------------------
-# Отключаем прослушку 0.0.0.0:53 в systemd-resolved (DNSStubListener=no)
-# ----------------------------------------------------------------------------
-configure_systemd_resolved_for_dnsmasq() {
-  echo "Отключаем DNSStubListener в /etc/systemd/resolved.conf..."
-  sudo sed -i 's/^[#]*\s*DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
-
-  # На случай, если в файле нет строки 'DNSStubListener=':
-  if ! grep -q '^DNSStubListener=' /etc/systemd/resolved.conf; then
-    # Вставим в секцию [Resolve], если вдруг её нет:
-    if ! grep -q '^\[Resolve\]' /etc/systemd/resolved.conf; then
-      echo "[Resolve]" | sudo tee -a /etc/systemd/resolved.conf
-    fi
-    echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf
-  fi
-
-  # Перезапускаем systemd-resolved
-  echo "Перезапускаем systemd-resolved..."
-  sudo systemctl restart systemd-resolved
-
-  echo "systemd-resolved теперь не слушает порт 53."
-}
-
-  # Установка dnsmasq
-  echo "Устанавливаем dnsmasq..."
+# ====================== DHCP ДЛЯ UBUNTU (dnsmasq) ============================
+install_dhcp_ubuntu() {
+  echo "Устанавливаем dnsmasq (Ubuntu)..."
   spinner_while "sudo apt-get install -y dnsmasq"
   local dns_ok=$?
   if [ $dns_ok -ne 0 ]; then
-    print_status $dns_ok "$block_name"
-    abort_script "$block_name" "dnsmasq не установился!"
+    print_status $dns_ok "Установка dnsmasq"
+    abort_script "Установка dnsmasq" "dnsmasq не установился!"
     return 1
   fi
 
+  # Простой конфиг dnsmasq (используем глобальную переменную $LOCAL_IP)
   sudo bash -c "cat <<EOD > /etc/dnsmasq.conf
 dhcp-authoritative
 domain=office.net
-listen-address=127.0.0.1,$local_ip
-dhcp-range=${local_ip%.*}.2,${local_ip%.*}.254,255.255.255.0,12h
+listen-address=127.0.0.1,$LOCAL_IP
+dhcp-range=${LOCAL_IP%.*}.2,${LOCAL_IP%.*}.254,255.255.255.0,12h
 server=1.1.1.1
 server=1.0.0.1
 cache-size=10000
@@ -399,26 +276,176 @@ EOD"
   sudo systemctl enable dnsmasq
   sudo systemctl restart dnsmasq
 
-  # Включаем ip_forward
+  # ip_forward
   sudo sed -i '/^#.*net.ipv4.ip_forward/s/^#//' /etc/sysctl.conf
   sudo sysctl -p
+
+  print_status 0 "Настройка DHCP (dnsmasq)"
+  return 0
+}
+
+# ====================== DHCP ДЛЯ MINT (isc-dhcp-server) ======================
+install_dhcp_mint() {
+  echo "Устанавливаем isc-dhcp-server (Mint)..."
+  spinner_while "sudo apt-get install -y isc-dhcp-server network-manager"
+  local dhcp_ok=$?
+  if [ $dhcp_ok -ne 0 ]; then
+    print_status $dhcp_ok "Установка isc-dhcp-server"
+    abort_script "Установка isc-dhcp-server" "isc-dhcp-server не установился!"
+    return 1
+  fi
+
+  echo "Отключаем systemd-networkd, включаем NetworkManager..."
+  sudo systemctl stop systemd-networkd
+  sudo systemctl disable systemd-networkd
+  sudo systemctl mask systemd-networkd
+
+  sudo systemctl enable NetworkManager
+  sudo systemctl start NetworkManager
+
+  echo "Создаём NM-подключение для LAN-интерфейса ($SELECTED_LAN_IF)..."
+  nmcli con add type ethernet con-name static-$SELECTED_LAN_IF \
+        ifname "$SELECTED_LAN_IF" ip4 "$LOCAL_IP/24" gw4 "$LOCAL_IP"
+  nmcli con mod static-$SELECTED_LAN_IF ipv4.dns "$LOCAL_IP"
+  nmcli con up static-$SELECTED_LAN_IF
+
+  # Настройка isc-dhcp-server
+  echo "INTERFACESv4=\"$SELECTED_LAN_IF\"" | sudo tee /etc/default/isc-dhcp-server
+
+  sudo bash -c "cat <<EOD > /etc/dhcp/dhcpd.conf
+option domain-name \"server.dark\";
+option domain-name-servers 1.1.1.1, 1.0.0.1;
+
+default-lease-time 600;
+max-lease-time 7200;
+authoritative;
+subnet ${LOCAL_IP%.*}.0 netmask 255.255.255.0 {
+  option routers $LOCAL_IP;
+  option broadcast-address ${LOCAL_IP%.*}.255;
+  range ${LOCAL_IP%.*}.2 ${LOCAL_IP%.*}.254;
+}
+EOD"
+
+  sudo systemctl restart isc-dhcp-server
+  sudo systemctl enable isc-dhcp-server
+
+  sudo sed -i '/^#.*net.ipv4.ip_forward/s/^#//' /etc/sysctl.conf
+  sudo sysctl -p
+
+  print_status 0 "Настройка DHCP (isc-dhcp-server)"
+  return 0
+}
+
+# ====================== 6. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
+configure_network() {
+  local block_name="Настройка сети"
+  echo -e "\n===== $block_name ====="
+
+  backup_netplan_configs
+  remove_our_netplan_file
+
+  # Спросим локальный IP
+  echo "Будет LAN: 192.168.1.1 (по умолчанию)."
+  read -p "Введите локальный IP (192.168.X.1) или Enter для 192.168.1.1: " local_ip
+  [ -z "$local_ip" ] && local_ip="192.168.1.1"
+  
+  # Глобальная переменная, чтобы install_dhcp_* знали
+  LOCAL_IP="$local_ip"
+
+  if [[ ! "$LOCAL_IP" =~ ^192\.168\.[0-9]{1,3}\.1$ ]]; then
+    print_status 1 "$block_name"
+    abort_script "$block_name" "Неверный формат IP: $LOCAL_IP"
+    return 1
+  fi
+
+  echo "Выбери способ получения WAN IP:"
+  echo "1) DHCP"
+  echo "2) Статический"
+  read -p "Ваш выбор (1/2): " wan_choice
+
+  local wan_config=""
+  if [ "$wan_choice" == "1" ]; then
+    wan_config="dhcp4: true"
+  elif [ "$wan_choice" == "2" ]; then
+    echo "Введи статический IP (пример: 46.98.249.14):"
+    read -p "WAN IP: " WAN_IP
+    echo "Введи маску /CIDR (пример 24):"
+    read -p "WAN_MASK: " WAN_CIDR
+    [ -z "$WAN_CIDR" ] && WAN_CIDR="24"
+    echo "Введи шлюз (46.98.249.13):"
+    read -p "WAN_GW: " WAN_GW
+    echo "DNS1:"
+    read -p "DNS1: " WAN_DNS1
+    echo "DNS2:"
+    read -p "DNS2: " WAN_DNS2
+
+    wan_config="dhcp4: false
+      addresses: [$WAN_IP/$WAN_CIDR]
+      gateway4: $WAN_GW
+      nameservers:
+        addresses: [$WAN_DNS1, $WAN_DNS2]"
+  else
+    print_status 1 "$block_name"
+    abort_script "$block_name" "Неправильный ввод (WAN choice)."
+    return 1
+  fi
+
+  # Создаём netplan (renderer=NetworkManager, чтобы было проще)
+  sudo bash -c "cat <<EOF > $NETPLAN_MAIN_FILE
+network:
+  version: 2
+  renderer: NetworkManager
+  ethernets:
+    $SELECTED_WAN_IF:
+      $wan_config
+    $SELECTED_LAN_IF:
+      dhcp4: false
+      addresses: [$LOCAL_IP/24]
+EOF"
+
+  echo "Применяем netplan..."
+  spinner_while "sudo netplan apply"
+  local net_ok=$?
+  if [ $net_ok -ne 0 ]; then
+    print_status $net_ok "$block_name"
+    abort_script "$block_name" "netplan apply неуспешен!"
+    restore_netplan_configs
+    spinner_while "sudo netplan apply"
+    return 1
+  fi
+
+  check_internet_with_animation
+  local inet_check=$?
+  if [ $inet_check -ne 0 ]; then
+    print_status 1 "$block_name"
+    abort_script "$block_name" "Нет интернета (код=$inet_check)."
+    remove_our_netplan_file
+    restore_netplan_configs
+    spinner_while "sudo netplan apply"
+    return 1
+  fi
+
+  # Вызываем DHCP-настройку в зависимости от дистрибутива
+  if [ "$DISTRO_TYPE" == "ubuntu" ]; then
+    install_dhcp_ubuntu
+  elif [ "$DISTRO_TYPE" == "mint" ]; then
+    install_dhcp_mint
+  else
+    echo "Неизвестный дистрибутив: не настраиваем DHCP."
+  fi
 
   print_status 0 "$block_name"
   return 0
 }
 
-sudo systemctl start systemd-resolved
-sudo systemctl enable systemd-resolved
-
-# ============ 7. УСТАНОВКА VPN + WEB ========================================
+# ====================== 7. УСТАНОВКА VPN + WEB ================================
 install_vpn_and_web() {
   local block_name="Установка VPN + Web"
   echo -e "\n===== $block_name ====="
 
-  # Удаляем ufw если есть
   remove_ufw_if_installed
 
-  # Автоматический ответ для iptables-persistent
+  # debconf-set-selections (чтобы iptables-persistent не спрашивал)
   sudo debconf-set-selections <<EOF
 iptables-persistent iptables-persistent/autosave_v4 boolean true
 iptables-persistent iptables-persistent/autosave_v6 boolean true
@@ -451,7 +478,7 @@ EOF
   sudo iptables -t nat -A POSTROUTING -o tun0 -j MASQUERADE
   sudo iptables-save | sudo tee /etc/iptables/rules.v4 >/dev/null
 
-  # Ставим веб-интерфейс
+  # Web-интерфейс
   echo "Готовим веб-интерфейс..."
   sudo rm -rf /var/www/html
   sudo git clone https://github.com/Rostarc/VPN-Web-Installer.git /var/www/html
@@ -477,7 +504,7 @@ EOD'
   return 0
 }
 
-# =========== 8. МОНИТОРИНГ VPN (SCRIPT + systemd) ===========================
+# ====================== 8. МОНИТОРИНГ VPN (TIMER) ============================
 create_vpn_monitor_script() {
   sudo bash -c "cat <<'EOF' > /usr/local/bin/vpn-monitor.sh
 #!/usr/bin/env bash
@@ -578,32 +605,36 @@ enable_vpn_monitor() {
   [ $res -eq 0 ] && echo "Мониторинг VPN запущен." || abort_script "$block_name" "Не удалось запустить таймер"
 }
 
-# ========== 9. УДАЛЕНИЕ НАСТРОЕК И ОТКАТ ====================================
+# ====================== 9. УДАЛЕНИЕ НАСТРОЕК И ОТКАТ ========================
 remove_all_settings() {
   local block_name="Удаление всех настроек"
   echo -e "\n===== $block_name ====="
 
   sudo systemctl stop openvpn@client1.service wg-quick@tun0.service \
-       dnsmasq.service apache2.service 2>/dev/null || true
+       dnsmasq.service apache2.service isc-dhcp-server.service 2>/dev/null || true
   sudo systemctl disable openvpn@client1.service 2>/dev/null || true
   sudo systemctl disable wg-quick@tun0.service 2>/dev/null || true
+  sudo systemctl disable dnsmasq.service 2>/dev/null || true
+  sudo systemctl disable isc-dhcp-server.service 2>/dev/null || true
 
   sudo rm -rf /etc/openvpn
   sudo rm -rf /etc/wireguard
 
-  spinner_while "sudo apt-get purge -y wireguard openvpn dnsmasq"
+  spinner_while "sudo apt-get purge -y wireguard openvpn dnsmasq isc-dhcp-server"
   spinner_while "sudo apt-get autoremove -y"
 
   sudo rm -rf /var/www/html
 
+  # iptables reset
   sudo iptables -t nat -D POSTROUTING -o tun0 -j MASQUERADE 2>/dev/null || true
   sudo iptables-save | sudo tee /etc/iptables/rules.v4 >/dev/null
 
+  # Откат netplan
   remove_our_netplan_file
   restore_netplan_configs
   spinner_while "sudo netplan apply"
 
-  # Удаляем мониторинг
+  # Отключаем мониторинг
   sudo systemctl disable vpn-monitor.service 2>/dev/null || true
   sudo systemctl stop vpn-monitor.service 2>/dev/null || true
   sudo rm -f /etc/systemd/system/vpn-monitor.service
@@ -616,7 +647,6 @@ remove_all_settings() {
   log_setup_info "Выполнено удаление и откат."
 }
 
-# ========= 10. ВОССТАНОВИТЬ NETPLAN =========================================
 restore_only_netplan() {
   local block_name="Восстановление netplan"
   echo -e "\n===== $block_name ====="
@@ -633,21 +663,21 @@ main_menu() {
   clear
   echo "============================================================="
   echo " Скрипт автонастройки (версия ${SCRIPT_VERSION})"
-  echo " VPN + Web + DHCP (dnsmasq) + Monitoring"
+  echo "  VPN + DHCP (dnsmasq/isc-dhcp-server) + Web + Monitoring"
+  echo "     (Ubuntu = dnsmasq, Mint = isc-dhcp-server)"
   echo "============================================================="
   echo ""
   echo "Выбери опцию:"
   echo "1) Полная настройка (Сеть + VPN + Web + Мониторинг)"
-  echo "2) Настроить только сети (DHCP, netplan)"
+  echo "2) Настроить только сети (DHCP)"
   echo "3) Установка только VPN + Web (без изменения сети)"
-  echo "4) Удалить все настройки (VPN, dnsmasq) и откатить netplan"
+  echo "4) Удалить все настройки (VPN, DHCP) и откатить netplan"
   echo "5) Восстановить netplan из бэкапа"
   echo ""
 
   read -p "Ваш выбор [1/2/3/4/5]: " choice
   case "$choice" in
     1)
-      # Полная
       select_interfaces
       configure_network
       [ $? -ne 0 ] && return
@@ -680,17 +710,15 @@ main_menu() {
 }
 
 # ========================== ЗАПУСК СКРИПТА ===================================
-check_ubuntu_or_mint
+detect_distro
+echo "Определён дистрибутив: $DISTRO_TYPE"
 
-# 1) Отключаем systemd-resolved (даже если это Ubuntu Desktop), чтобы dnsmasq занял порт 53
-disable_systemd_resolved
-
-# 2) Полный upgrade
+# 1) Полный upgrade
 full_system_upgrade
 [ $? -ne 0 ] && exit 1
 
-# 3) Предложить удалить старые VPN-конфиги
+# 2) Предложить удалить старые VPN-конфиги
 remove_or_backup_old_configs
 
-# 4) Запуск меню
+# 3) Запустить меню
 main_menu
