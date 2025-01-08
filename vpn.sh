@@ -384,6 +384,9 @@ EOD"
   return 0
 }
 
+sudo systemctl start systemd-resolved
+sudo systemctl enable systemd-resolved
+
 # ============ 7. УСТАНОВКА VPN + WEB ========================================
 install_vpn_and_web() {
   local block_name="Установка VPN + Web"
