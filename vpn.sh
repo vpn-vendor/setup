@@ -25,7 +25,7 @@ LOG_MONITOR_DIR="$LOG_BASE_DIR/vpn-monitor"
 LOG_RETENTION_DAYS=7
 
 NETPLAN_BACKUP_DIR="/etc/netplan/backup_$(date +%Y%m%d_%H%M%S)"
-NETPLAN_MAIN_FILE="/etc/netplan/01-my-network-setup.yaml"
+NETPLAN_MAIN_FILE="/etc/netplan/01-network-manager-all.yaml"
 
 VPN_MONITOR_INTERVAL="60"
 
