@@ -27,7 +27,7 @@ VPN_MONITOR_INTERVAL="60"
 NETPLAN_BACKUP_DIR="/etc/netplan/backup_$(date +%Y%m%d_%H%M%S)"
 
 # Основной netplan-файл (если используем netplan на Ubuntu)
-NETPLAN_MAIN_FILE="/etc/netplan/01-my-network-setup.yaml"
+NETPLAN_MAIN_FILE="/etc/netplan/01-network-manager-all.yml"
 
 DISTRO_TYPE="unknown"
 
@@ -263,6 +263,13 @@ EOD"
 }
 
 # ====================== DHCP ДЛЯ MINT (isc-dhcp-server) ======================
+echo "Отключаем systemd-networkd, включаем NetworkManager..."
+  sudo systemctl stop systemd-networkd
+  sudo systemctl mask systemd-networkd
+
+  sudo systemctl enable NetworkManager
+  sudo systemctl start NetworkManager
+  
 install_dhcp_mint() {
   echo "Устанавливаем isc-dhcp-server (Mint)..."
   spinner_while "sudo apt-get install -y isc-dhcp-server network-manager"
@@ -273,12 +280,6 @@ install_dhcp_mint() {
     return 1
   fi
 
-  echo "Отключаем systemd-networkd, включаем NetworkManager..."
-  sudo systemctl stop systemd-networkd
-  sudo systemctl mask systemd-networkd
-
-  sudo systemctl enable NetworkManager
-  sudo systemctl start NetworkManager
 
   echo "Создаём NM-подключение для LAN-интерфейса ($SELECTED_LAN_IF)..."
   nmcli con add type ethernet con-name static-$SELECTED_LAN_IF \
@@ -314,6 +315,9 @@ EOD"
 }
 
 # ====================== 5. НАСТРОЙКА СЕТИ (NETPLAN/или NM) ===================
+sudo chmod 600 /etc/netplan/01-network-manager-all.yaml
+sudo chown root:root /etc/netplan/01-network-manager-all.yaml
+
 sudo systemctl start systemd-networkd
 sudo systemctl enable systemd-networkd
 configure_network() {
