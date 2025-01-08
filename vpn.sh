@@ -353,6 +353,29 @@ EOF"
     return 1
   fi
 
+  # ----------------------------------------------------------------------------
+# Отключаем прослушку 0.0.0.0:53 в systemd-resolved (DNSStubListener=no)
+# ----------------------------------------------------------------------------
+configure_systemd_resolved_for_dnsmasq() {
+  echo "Отключаем DNSStubListener в /etc/systemd/resolved.conf..."
+  sudo sed -i 's/^[#]*\s*DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+
+  # На случай, если в файле нет строки 'DNSStubListener=':
+  if ! grep -q '^DNSStubListener=' /etc/systemd/resolved.conf; then
+    # Вставим в секцию [Resolve], если вдруг её нет:
+    if ! grep -q '^\[Resolve\]' /etc/systemd/resolved.conf; then
+      echo "[Resolve]" | sudo tee -a /etc/systemd/resolved.conf
+    fi
+    echo "DNSStubListener=no" | sudo tee -a /etc/systemd/resolved.conf
+  fi
+
+  # Перезапускаем systemd-resolved
+  echo "Перезапускаем systemd-resolved..."
+  sudo systemctl restart systemd-resolved
+
+  echo "systemd-resolved теперь не слушает порт 53."
+}
+
   # Установка dnsmasq
   echo "Устанавливаем dnsmasq..."
   spinner_while "sudo apt-get install -y dnsmasq"
