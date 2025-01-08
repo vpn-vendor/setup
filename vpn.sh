@@ -321,7 +321,7 @@ configure_network() {
   sudo bash -c "cat <<EOF > $NETPLAN_MAIN_FILE
 network:
   version: 2
-  renderer: networkd
+  renderer: NetworkManager
   ethernets:
     $SELECTED_WAN_IF:
 $wan_config
